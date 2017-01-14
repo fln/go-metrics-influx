@@ -9,9 +9,20 @@ import (
 	metrics "github.com/rcrowley/go-metrics"
 )
 
+func worker() {
+	c := metrics.NewCounter()
+	metrics.Register("foo", c)
+
+	for {
+		c.Inc(1)
+		time.Sleep(time.Second)
+	}
+}
+
 func Example() {
-	// Create context with cancel
+	// Create context with cancel callback
 	ctx, stop := context.WithCancel(context.Background())
+
 	go influx.NewReporter(
 		metrics.DefaultRegistry,           // go-metrics registry
 		5*time.Second,                     // report interval
@@ -24,14 +35,10 @@ func Example() {
 		Run()
 
 	// ...
-	c := metrics.NewCounter()
-	metrics.Register("foo", c)
-	c.Inc(47)
-
+	go worker()
 	// ...
+
+	// Stop reporter goroutine after 5 minutes
 	time.Sleep(5 * time.Minute)
-	// ...
-
-	// Stop reporter goroutine
 	stop()
 }
