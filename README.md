@@ -19,7 +19,7 @@ Usage
 -----
 
 ```go
-package influx_test
+package main
 
 import (
 	"context"

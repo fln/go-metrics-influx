@@ -9,7 +9,7 @@ import (
 	metrics "github.com/rcrowley/go-metrics"
 )
 
-func main() {
+func Example() {
 	// Create context with cancel
 	ctx, stop := context.WithCancel(context.Background())
 	go influx.NewReporter(
