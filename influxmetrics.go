@@ -85,12 +85,14 @@ func (r *Reporter) Run() {
 	})
 	if err != nil {
 		r.log.WithField("url", r.url).WithError(err).Error("creating new influx client")
+		return
 	}
 
-	ticker := time.Tick(r.interval)
+	ticker := time.NewTicker(r.interval)
+	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker:
+		case <-ticker.C:
 			r.report(c)
 		case <-r.ctx.Done():
 			return
