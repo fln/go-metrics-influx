@@ -3,7 +3,6 @@ package influx
 
 import (
 	"context"
-	"fmt"
 	"io/ioutil"
 	"time"
 
@@ -23,6 +22,8 @@ type Reporter struct {
 	precision string
 	ctx       context.Context
 	log       logrus.FieldLogger
+
+	lastCounter map[string]int64
 }
 
 // NewReporter creates a new instance of influx metrcs reporter. It may be
@@ -43,6 +44,7 @@ func NewReporter(registry metrics.Registry, interval time.Duration, url string, 
 			Hooks:     make(logrus.LevelHooks),
 			Level:     logrus.PanicLevel,
 		},
+		lastCounter: make(map[string]int64),
 	}
 }
 
@@ -121,17 +123,21 @@ func (r *Reporter) report(c client.Client) {
 
 		switch metric := i.(type) {
 		case metrics.Counter:
+			count := metric.Count()
+			diff := count - r.lastCounter[name]
+			r.lastCounter[name] = count
 			point, err = client.NewPoint(
-				fmt.Sprintf("%s.count", name),
+				name,
 				r.tags,
 				map[string]interface{}{
-					"value": metric.Count(),
+					"count": count,
+					"diff":  diff,
 				},
 				now,
 			)
 		case metrics.Gauge:
 			point, err = client.NewPoint(
-				fmt.Sprintf("%s.gauge", name),
+				name,
 				r.tags,
 				map[string]interface{}{
 					"value": metric.Value(),
@@ -140,7 +146,7 @@ func (r *Reporter) report(c client.Client) {
 			)
 		case metrics.GaugeFloat64:
 			point, err = client.NewPoint(
-				fmt.Sprintf("%s.gauge", name),
+				name,
 				r.tags,
 				map[string]interface{}{
 					"value": metric.Value(),
@@ -151,7 +157,7 @@ func (r *Reporter) report(c client.Client) {
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
 			point, err = client.NewPoint(
-				fmt.Sprintf("%s.histogram", name),
+				name,
 				r.tags,
 				map[string]interface{}{
 					"count":    ms.Count(),
@@ -172,7 +178,7 @@ func (r *Reporter) report(c client.Client) {
 		case metrics.Meter:
 			ms := metric.Snapshot()
 			point, err = client.NewPoint(
-				fmt.Sprintf("%s.meter", name),
+				name,
 				r.tags,
 				map[string]interface{}{
 					"count": ms.Count(),
@@ -187,7 +193,7 @@ func (r *Reporter) report(c client.Client) {
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
 			point, err = client.NewPoint(
-				fmt.Sprintf("%s.timer", name),
+				name,
 				r.tags,
 				map[string]interface{}{
 					"count":    ms.Count(),
