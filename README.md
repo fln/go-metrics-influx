@@ -14,6 +14,16 @@ implementation but with the following changes:
 - Optional settings can be set by chaining setter methods.
 - Support for structured logging of errors via [logrus](vrischmann/go-metrics-influxdb).
 - Support for stopping reporter via context.
+- Tags can be passed as `key=val` pairs separated by `,` in the metrics name
+  (similar to influx line protocol).
+
+Tag pairs extraction from metrics name example:
+
+- Metric with name `hit_counter,region=eu,customerID=15` would create
+  `hit_counter` measurement with tags `{"region": "eu", "customerID": "15"}`.
+- Invalid tag pairs are kept in the measurement name. Metric with a name
+  `hit_counter,smth,a=b` would create `hit_counter,smth` measurement with tags
+  `{"a": "b"}`.
 
 Usage
 -----

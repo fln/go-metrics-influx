@@ -3,7 +3,9 @@ package influx
 
 import (
 	"context"
+	"fmt"
 	"io/ioutil"
+	"strings"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -121,14 +123,32 @@ func (r *Reporter) report(c client.Client) {
 		var point *client.Point
 		var err error
 
+		tags := make(map[string]string)
+		for key, val := range r.tags {
+			tags[key] = val
+		}
+
+		measurement := name
+		if parts := strings.Split(name, ","); len(parts) > 1 {
+			measurement = parts[0]
+			for i := 1; i < len(parts); i++ {
+				kv := strings.Split(parts[i], "=")
+				if len(kv) == 2 {
+					tags[kv[0]] = kv[1]
+				} else {
+					measurement = fmt.Sprintf("%s,%s", measurement, parts[i])
+				}
+			}
+		}
+
 		switch metric := i.(type) {
 		case metrics.Counter:
 			count := metric.Count()
 			diff := count - r.lastCounter[name]
 			r.lastCounter[name] = count
 			point, err = client.NewPoint(
-				name,
-				r.tags,
+				measurement,
+				tags,
 				map[string]interface{}{
 					"count": count,
 					"diff":  diff,
@@ -137,8 +157,8 @@ func (r *Reporter) report(c client.Client) {
 			)
 		case metrics.Gauge:
 			point, err = client.NewPoint(
-				name,
-				r.tags,
+				measurement,
+				tags,
 				map[string]interface{}{
 					"value": metric.Value(),
 				},
@@ -146,8 +166,8 @@ func (r *Reporter) report(c client.Client) {
 			)
 		case metrics.GaugeFloat64:
 			point, err = client.NewPoint(
-				name,
-				r.tags,
+				measurement,
+				tags,
 				map[string]interface{}{
 					"value": metric.Value(),
 				},
@@ -157,8 +177,8 @@ func (r *Reporter) report(c client.Client) {
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
 			point, err = client.NewPoint(
-				name,
-				r.tags,
+				measurement,
+				tags,
 				map[string]interface{}{
 					"count":    ms.Count(),
 					"max":      ms.Max(),
@@ -178,8 +198,8 @@ func (r *Reporter) report(c client.Client) {
 		case metrics.Meter:
 			ms := metric.Snapshot()
 			point, err = client.NewPoint(
-				name,
-				r.tags,
+				measurement,
+				tags,
 				map[string]interface{}{
 					"count": ms.Count(),
 					"m1":    ms.Rate1(),
@@ -193,8 +213,8 @@ func (r *Reporter) report(c client.Client) {
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
 			point, err = client.NewPoint(
-				name,
-				r.tags,
+				measurement,
+				tags,
 				map[string]interface{}{
 					"count":    ms.Count(),
 					"max":      ms.Max(),
