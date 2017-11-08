@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	client "github.com/influxdata/influxdb/client/v2"
 	metrics "github.com/rcrowley/go-metrics"
+	"github.com/sirupsen/logrus"
 )
 
 // Reporter holds configuration of go-metrics influx exporter. It can be

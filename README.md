@@ -35,9 +35,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/Sirupsen/logrus"
-	influx "github.com/fln/go-metrics-influx"
-	metrics "github.com/rcrowley/go-metrics"
+        influx "github.com/fln/go-metrics-influx"
+        metrics "github.com/rcrowley/go-metrics"
+        "github.com/sirupsen/logrus"
 )
 
 
