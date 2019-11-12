@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	client "github.com/influxdata/influxdb/client/v2"
+	client "github.com/influxdata/influxdb1-client"
 	metrics "github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )
