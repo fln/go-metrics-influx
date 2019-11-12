@@ -1,5 +1,3 @@
-// Package influx is a go-metrics to influx DB reporter implementation.
-package influx
 
 import (
 	"context"
@@ -8,7 +6,8 @@ import (
 	"strings"
 	"time"
 
-	client "github.com/influxdata/influxdb1-client"
+	_ "github.com/influxdata/influxdb1-client"
+	client "github.com/influxdata/influxdb1-client/v2"
 	metrics "github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )
