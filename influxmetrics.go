@@ -1,3 +1,5 @@
+// Package influx is a go-metrics to influx DB reporter implementation.
+package influx
 
 import (
 	"context"
