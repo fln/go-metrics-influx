@@ -5,10 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"net/url"
 	"strings"
 	"time"
 
-	client "github.com/influxdata/influxdb/client/v2"
+	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
+	"github.com/influxdata/influxdb-client-go/v2/api"
+	"github.com/influxdata/influxdb-client-go/v2/api/write"
 	metrics "github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )
@@ -21,9 +24,11 @@ type Reporter struct {
 	url       string
 	database  string
 	tags      map[string]string
-	precision string
-	ctx       context.Context
-	log       logrus.FieldLogger
+	precision time.Duration
+	org       string
+
+	ctx context.Context
+	log logrus.FieldLogger
 
 	lastCounter map[string]int64
 }
@@ -38,7 +43,8 @@ func NewReporter(registry metrics.Registry, interval time.Duration, url string, 
 		url:       url,
 		database:  db,
 		tags:      nil,
-		precision: "s",
+		precision: time.Second,
+		org:       "",
 		ctx:       context.Background(),
 		log: &logrus.Logger{
 			Out:       ioutil.Discard,
@@ -61,7 +67,7 @@ func (r *Reporter) Tags(tags map[string]string) *Reporter {
 // default timestamps are reported with a seconds precision. Having higher than
 // seconds precision should be useful only when export interval is less
 // than a second.
-func (r *Reporter) Precision(precision string) *Reporter {
+func (r *Reporter) Precision(precision time.Duration) *Reporter {
 	r.precision = precision
 	return r
 }
@@ -79,14 +85,31 @@ func (r *Reporter) Logger(log logrus.FieldLogger) *Reporter {
 	return r
 }
 
+// Organization sets organization name. Used by influx cloud.
+func (r *Reporter) Organization(org string) *Reporter {
+	r.org = org
+	return r
+}
+
 // Run starts exporting metrics to influx DB. This method will block until
 // context associated with this reporter is stopper (of forever if contex is
 // not set).
 func (r *Reporter) Run() {
-	c, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr:    r.url,
-		Timeout: r.interval,
-	})
+	url, err := url.Parse(r.url)
+	if err != nil {
+		r.log.WithField("url", r.url).WithError(err).Error("malformed influx server URL")
+		return
+	}
+
+	token := url.User.String()
+	url.User = nil
+
+	c := influxdb2.NewClientWithOptions(url.String(), token,
+		influxdb2.DefaultOptions().
+			SetHTTPRequestTimeout(uint(r.interval/time.Second)).
+			SetPrecision(r.precision).
+			SetUseGZip(true),
+	).WriteAPIBlocking(r.org, r.database)
 	if err != nil {
 		r.log.WithField("url", r.url).WithError(err).Error("creating new influx client")
 		return
@@ -97,7 +120,7 @@ func (r *Reporter) Run() {
 	for {
 		select {
 		case <-ticker.C:
-			r.report(c)
+			r.report(r.ctx, c)
 		case <-r.ctx.Done():
 			return
 		}
@@ -105,24 +128,11 @@ func (r *Reporter) Run() {
 }
 
 // report send current snapshot of metrics registry to influx DB.
-func (r *Reporter) report(c client.Client) {
-	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
-		Database:  r.database,
-		Precision: r.precision,
-	})
-	if err != nil {
-		r.log.WithFields(logrus.Fields{
-			"db":        r.database,
-			"precision": r.precision,
-		}).WithError(err).Error("creating influx batch points")
-		return
-	}
+func (r *Reporter) report(ctx context.Context, c api.WriteAPIBlocking) {
+	var points []*write.Point
 
 	now := time.Now()
 	r.registry.Each(func(name string, i interface{}) {
-		var point *client.Point
-		var err error
-
 		tags := make(map[string]string)
 		for key, val := range r.tags {
 			tags[key] = val
@@ -149,7 +159,7 @@ func (r *Reporter) report(c client.Client) {
 				diff = count
 			}
 			r.lastCounter[name] = count
-			point, err = client.NewPoint(
+			points = append(points, influxdb2.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
@@ -157,29 +167,30 @@ func (r *Reporter) report(c client.Client) {
 					"diff":  diff,
 				},
 				now,
-			)
+			))
 		case metrics.Gauge:
-			point, err = client.NewPoint(
+			points = append(points, influxdb2.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
 					"value": metric.Value(),
 				},
 				now,
-			)
+			))
 		case metrics.GaugeFloat64:
-			point, err = client.NewPoint(
+			points = append(points, influxdb2.NewPoint(
+
 				measurement,
 				tags,
 				map[string]interface{}{
 					"value": metric.Value(),
 				},
 				now,
-			)
+			))
 		case metrics.Histogram:
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
-			point, err = client.NewPoint(
+			points = append(points, influxdb2.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
@@ -197,10 +208,10 @@ func (r *Reporter) report(c client.Client) {
 					"p9999":    ps[5],
 				},
 				now,
-			)
+			))
 		case metrics.Meter:
 			ms := metric.Snapshot()
-			point, err = client.NewPoint(
+			points = append(points, influxdb2.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
@@ -211,11 +222,11 @@ func (r *Reporter) report(c client.Client) {
 					"mean":  ms.RateMean(),
 				},
 				now,
-			)
+			))
 		case metrics.Timer:
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
-			point, err = client.NewPoint(
+			points = append(points, influxdb2.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
@@ -237,22 +248,17 @@ func (r *Reporter) report(c client.Client) {
 					"meanrate": ms.RateMean(),
 				},
 				now,
-			)
+			))
 		default:
 			// Unhandled metric type
 			return
 		}
-		if err != nil {
-			r.log.WithField("name", name).WithError(err).Error("creating influx data point")
-			return
-		}
-		bp.AddPoint(point)
 	})
 
-	if len(bp.Points()) == 0 {
+	if len(points) == 0 {
 		return
 	}
-	if err = c.Write(bp); err != nil {
+	if err := c.WritePoint(ctx, points...); err != nil {
 		r.log.WithError(err).Error("writing data points to influx")
 	}
 }
