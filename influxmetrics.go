@@ -145,6 +145,9 @@ func (r *Reporter) report(c client.Client) {
 		case metrics.Counter:
 			count := metric.Count()
 			diff := count - r.lastCounter[name]
+			if diff < 0 {
+				diff = count
+			}
 			r.lastCounter[name] = count
 			point, err = client.NewPoint(
 				measurement,
