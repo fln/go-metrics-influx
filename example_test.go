@@ -2,9 +2,10 @@ package influx_test
 
 import (
 	"context"
+	"sync"
 	"time"
 
-	influx "github.com/fln/go-metrics-influx"
+	influx "github.com/dbadv/go-metrics-influx"
 	metrics "github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )
@@ -20,19 +21,23 @@ func worker() {
 }
 
 func Example() {
-	// Create context with cancel callback
 	ctx, stop := context.WithCancel(context.Background())
 
-	go influx.NewReporter(
-		metrics.DefaultRegistry,           // go-metrics registry
-		5*time.Second,                     // report interval
-		"http://user:pass@localhost:8086", // Influx URL and credentials
-		"app-metrics",                     // databse name
-	).
-		Tags(map[string]string{"instance": "app@localhost"}).
-		Context(ctx).
-		Logger(logrus.WithField("thread", "go-metrics-influx")).
-		Run()
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		influx.New(
+			metrics.DefaultRegistry, // go-metrics registry
+			"http://localhost:8086", // influx URL
+			"user:pass",             // influx token
+			"org",                   // org name
+			"bucket",                // bucket name
+			influx.Tags(map[string]string{"instance": "app@localhost"}),
+			influx.Logger(logrus.WithField("thread", "go-metrics-influx")),
+		).Run(ctx)
+	}()
 
 	// ...
 	go worker()
@@ -41,4 +46,7 @@ func Example() {
 	// Stop reporter goroutine after 5 minutes
 	time.Sleep(5 * time.Minute)
 	stop()
+
+	// Wait for graceful shutdown.
+	wg.Wait()
 }

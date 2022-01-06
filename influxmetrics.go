@@ -4,124 +4,157 @@ package influx
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	client "github.com/influxdata/influxdb/client/v2"
+	influxdb "github.com/influxdata/influxdb-client-go/v2"
+	"github.com/influxdata/influxdb-client-go/v2/api"
+	"github.com/influxdata/influxdb-client-go/v2/api/write"
+	"github.com/influxdata/influxdb-client-go/v2/log"
 	metrics "github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )
 
-// Reporter holds configuration of go-metrics influx exporter. It can be
-// configured only be public setter methods.
+// Reporter holds configuration of go-metrics influx exporter.
+// It should only be created using New function.
 type Reporter struct {
-	registry  metrics.Registry
-	interval  time.Duration
-	url       string
-	database  string
-	tags      map[string]string
-	precision string
-	ctx       context.Context
-	log       logrus.FieldLogger
-
+	log         logrus.FieldLogger
+	registry    metrics.Registry
+	interval    time.Duration
+	client      influxdb.Client
+	api         api.WriteAPI
+	tags        map[string]string
+	precision   time.Duration
 	lastCounter map[string]int64
 }
 
-// NewReporter creates a new instance of influx metrcs reporter. It may be
-// further configured with helper methods. It will not start exporting metrics
-// until Run() is called.
-func NewReporter(registry metrics.Registry, interval time.Duration, url string, db string) *Reporter {
-	return &Reporter{
-		registry:  registry,
-		interval:  interval,
-		url:       url,
-		database:  db,
-		tags:      nil,
-		precision: "s",
-		ctx:       context.Background(),
-		log: &logrus.Logger{
-			Out:       ioutil.Discard,
-			Formatter: new(logrus.TextFormatter),
-			Hooks:     make(logrus.LevelHooks),
-			Level:     logrus.PanicLevel,
-		},
-		lastCounter: make(map[string]int64),
+// Option allows to configure optional reporter parameters.
+type Option func(*Reporter)
+
+// Logger sets custom logrus logger for error reporting.
+func Logger(log logrus.FieldLogger) Option {
+	return func(r *Reporter) {
+		r.log = log
 	}
 }
 
 // Tags sets a set of tags that will be assiciated with each influx data point
 // written by this exporter.
-func (r *Reporter) Tags(tags map[string]string) *Reporter {
-	r.tags = tags
-	return r
+func Tags(tags map[string]string) Option {
+	return func(r *Reporter) {
+		r.tags = tags
+	}
 }
 
-// Precision changes the timestamp precision used in reported data points. By
-// default timestamps are reported with a seconds precision. Having higher than
+// Interval specifies how often metrics should be reported to influxdb. By
+// default it will be done every 10 seconds.
+func Interval(intv time.Duration) Option {
+	return func(r *Reporter) {
+		r.interval = intv
+	}
+}
+
+// Precision changes the duration precision used in reported data points. By
+// default timestamps are reported with a 1 second precision. Having higher than
 // seconds precision should be useful only when export interval is less
 // than a second.
-func (r *Reporter) Precision(precision string) *Reporter {
-	r.precision = precision
-	return r
+func Precision(prec time.Duration) Option {
+	return func(r *Reporter) {
+		r.precision = prec
+	}
 }
 
-// Context assigns a context to this reporter. Context is only used to stop
-// reporter Run() method.
-func (r *Reporter) Context(ctx context.Context) *Reporter {
-	r.ctx = ctx
-	return r
-}
+// New creates a new instance of influx metrics reporter. Variadic function
+// parameters can be used to further configure reporter.
+// It will not start exporting metrics until Run() is called.
+func New(
+	reg metrics.Registry,
+	url string,
+	auth string,
+	org string,
+	bucket string,
+	opts ...Option,
+) *Reporter {
 
-// Logger sets optional logrus logger for error reporting.
-func (r *Reporter) Logger(log logrus.FieldLogger) *Reporter {
-	r.log = log
+	r := &Reporter{
+		log: &logrus.Logger{
+			Out:       io.Discard,
+			Formatter: new(logrus.TextFormatter),
+			Hooks:     make(logrus.LevelHooks),
+			Level:     logrus.PanicLevel,
+		},
+		registry:    reg,
+		interval:    10 * time.Second,
+		precision:   time.Second,
+		lastCounter: make(map[string]int64),
+	}
+
+	for _, opt := range opts {
+		opt(r)
+	}
+
+	r.client = influxdb.NewClientWithOptions(
+		url,
+		auth,
+		influxdb.DefaultOptions().SetHTTPClient(&http.Client{
+			Timeout: r.interval,
+		}).SetPrecision(r.precision),
+	)
+
+	r.api = r.client.WriteAPI(org, bucket)
+
+	// We disable influxdb client logger, as we're replacing it with
+	// our own.
+	log.Log = nil
+
 	return r
 }
 
 // Run starts exporting metrics to influx DB. This method will block until
-// context associated with this reporter is stopper (of forever if contex is
-// not set).
-func (r *Reporter) Run() {
-	c, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr:    r.url,
-		Timeout: r.interval,
-	})
-	if err != nil {
-		r.log.WithField("url", r.url).WithError(err).Error("creating new influx client")
-		return
-	}
+// context is cancelled. After context is closed, reporter client will be
+// closed as well.
+func (r *Reporter) Run(ctx context.Context) {
+	defer r.client.Close()
 
-	ticker := time.NewTicker(r.interval)
-	defer ticker.Stop()
+	tc := time.NewTicker(r.interval)
+	defer tc.Stop()
+
+	sctx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case err := <-r.api.Errors():
+				r.log.WithError(err).Error("writing to influx database")
+			case <-sctx.Done():
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
-		case <-ticker.C:
-			r.report(c)
-		case <-r.ctx.Done():
+		case <-ctx.Done():
+			cancel()
+			wg.Wait()
 			return
+		case tstamp := <-tc.C:
+			r.report(tstamp)
 		}
 	}
 }
 
 // report send current snapshot of metrics registry to influx DB.
-func (r *Reporter) report(c client.Client) {
-	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
-		Database:  r.database,
-		Precision: r.precision,
-	})
-	if err != nil {
-		r.log.WithFields(logrus.Fields{
-			"db":        r.database,
-			"precision": r.precision,
-		}).WithError(err).Error("creating influx batch points")
-		return
-	}
-
-	now := time.Now()
+func (r *Reporter) report(tstamp time.Time) {
 	r.registry.Each(func(name string, i interface{}) {
-		var point *client.Point
-		var err error
+		var point *write.Point
 
 		tags := make(map[string]string)
 		for key, val := range r.tags {
@@ -135,9 +168,10 @@ func (r *Reporter) report(c client.Client) {
 				kv := strings.Split(parts[i], "=")
 				if len(kv) == 2 {
 					tags[kv[0]] = kv[1]
-				} else {
-					measurement = fmt.Sprintf("%s,%s", measurement, parts[i])
+					continue
 				}
+
+				measurement = fmt.Sprintf("%s,%s", measurement, parts[i])
 			}
 		}
 
@@ -148,38 +182,39 @@ func (r *Reporter) report(c client.Client) {
 			if diff < 0 {
 				diff = count
 			}
+
 			r.lastCounter[name] = count
-			point, err = client.NewPoint(
+			point = write.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
 					"count": count,
 					"diff":  diff,
 				},
-				now,
+				tstamp,
 			)
 		case metrics.Gauge:
-			point, err = client.NewPoint(
+			point = write.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
 					"value": metric.Value(),
 				},
-				now,
+				tstamp,
 			)
 		case metrics.GaugeFloat64:
-			point, err = client.NewPoint(
+			point = write.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
 					"value": metric.Value(),
 				},
-				now,
+				tstamp,
 			)
 		case metrics.Histogram:
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
-			point, err = client.NewPoint(
+			point = write.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
@@ -196,11 +231,11 @@ func (r *Reporter) report(c client.Client) {
 					"p999":     ps[4],
 					"p9999":    ps[5],
 				},
-				now,
+				tstamp,
 			)
 		case metrics.Meter:
 			ms := metric.Snapshot()
-			point, err = client.NewPoint(
+			point = write.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
@@ -210,12 +245,12 @@ func (r *Reporter) report(c client.Client) {
 					"m15":   ms.Rate15(),
 					"mean":  ms.RateMean(),
 				},
-				now,
+				tstamp,
 			)
 		case metrics.Timer:
 			ms := metric.Snapshot()
 			ps := ms.Percentiles([]float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999})
-			point, err = client.NewPoint(
+			point = write.NewPoint(
 				measurement,
 				tags,
 				map[string]interface{}{
@@ -236,23 +271,15 @@ func (r *Reporter) report(c client.Client) {
 					"m15":      ms.Rate15(),
 					"meanrate": ms.RateMean(),
 				},
-				now,
+				tstamp,
 			)
 		default:
 			// Unhandled metric type
 			return
 		}
-		if err != nil {
-			r.log.WithField("name", name).WithError(err).Error("creating influx data point")
-			return
-		}
-		bp.AddPoint(point)
+
+		r.api.WritePoint(point)
 	})
 
-	if len(bp.Points()) == 0 {
-		return
-	}
-	if err = c.Write(bp); err != nil {
-		r.log.WithError(err).Error("writing data points to influx")
-	}
+	r.api.Flush()
 }
