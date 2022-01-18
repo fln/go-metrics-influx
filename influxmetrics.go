@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	influxdb "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
+	http2 "github.com/influxdata/influxdb-client-go/v2/api/http"
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
 	"github.com/influxdata/influxdb-client-go/v2/log"
 	metrics "github.com/rcrowley/go-metrics"
@@ -21,14 +21,14 @@ import (
 // Reporter holds configuration of go-metrics influx exporter.
 // It should only be created using New function.
 type Reporter struct {
-	log         logrus.FieldLogger
-	registry    metrics.Registry
-	interval    time.Duration
-	client      influxdb.Client
-	api         api.WriteAPI
-	tags        map[string]string
-	precision   time.Duration
-	lastCounter map[string]int64
+	log                     logrus.FieldLogger
+	registry                metrics.Registry
+	url, token, org, bucket string
+	interval                time.Duration
+	retries                 uint
+	tags                    map[string]string
+	precision               time.Duration
+	lastCounter             map[string]int64
 }
 
 // Option allows to configure optional reporter parameters.
@@ -67,13 +67,21 @@ func Precision(prec time.Duration) Option {
 	}
 }
 
+// Retries sets retries count after write failure. By default 3 retries are
+// done.
+func Retries(retries uint) Option {
+	return func(r *Reporter) {
+		r.retries = retries
+	}
+}
+
 // New creates a new instance of influx metrics reporter. Variadic function
 // parameters can be used to further configure reporter.
 // It will not start exporting metrics until Run() is called.
 func New(
 	reg metrics.Registry,
 	url string,
-	auth string,
+	token string,
 	org string,
 	bucket string,
 	opts ...Option,
@@ -86,6 +94,11 @@ func New(
 			Hooks:     make(logrus.LevelHooks),
 			Level:     logrus.PanicLevel,
 		},
+		url:         url,
+		token:       token,
+		org:         org,
+		bucket:      bucket,
+		retries:     3,
 		registry:    reg,
 		interval:    10 * time.Second,
 		precision:   time.Second,
@@ -95,16 +108,6 @@ func New(
 	for _, opt := range opts {
 		opt(r)
 	}
-
-	r.client = influxdb.NewClientWithOptions(
-		url,
-		auth,
-		influxdb.DefaultOptions().SetHTTPClient(&http.Client{
-			Timeout: r.interval,
-		}).SetPrecision(r.precision),
-	)
-
-	r.api = r.client.WriteAPI(org, bucket)
 
 	// We disable influxdb client logger, as we're replacing it with
 	// our own.
@@ -117,42 +120,44 @@ func New(
 // context is cancelled. After context is closed, reporter client will be
 // closed as well.
 func (r *Reporter) Run(ctx context.Context) {
-	defer r.client.Close()
+	client := influxdb.NewClientWithOptions(
+		r.url,
+		r.token,
+		influxdb.DefaultOptions().SetHTTPClient(&http.Client{
+			Timeout: r.interval,
+		}).SetPrecision(r.precision),
+	)
+	defer client.Close()
+
+	rapi := client.WriteAPI(r.org, r.bucket)
+	rapi.SetWriteFailedCallback(
+		func(_ string, err http2.Error, retry uint) bool {
+			r.log.WithField("error", err).
+				Error("writing metrics batch to influx database")
+
+			if retry >= r.retries {
+				return false
+			}
+
+			return true
+		},
+	)
 
 	tc := time.NewTicker(r.interval)
 	defer tc.Stop()
 
-	sctx, cancel := context.WithCancel(context.Background())
-
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case err := <-r.api.Errors():
-				r.log.WithError(err).Error("writing to influx database")
-			case <-sctx.Done():
-				return
-			}
-		}
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
-			cancel()
-			wg.Wait()
 			return
 		case tstamp := <-tc.C:
-			r.report(tstamp)
+			r.report(rapi, tstamp)
 		}
 	}
 }
 
 // report send current snapshot of metrics registry to influx DB.
-func (r *Reporter) report(tstamp time.Time) {
+func (r *Reporter) report(rapi api.WriteAPI, tstamp time.Time) {
 	r.registry.Each(func(name string, i interface{}) {
 		var point *write.Point
 
@@ -278,8 +283,8 @@ func (r *Reporter) report(tstamp time.Time) {
 			return
 		}
 
-		r.api.WritePoint(point)
+		rapi.WritePoint(point)
 	})
 
-	r.api.Flush()
+	rapi.Flush()
 }
