@@ -42,7 +42,9 @@ import (
 
 func worker() {
 	c := metrics.NewCounter()
-	metrics.Register("foo", c)
+	if err := metrics.Register("foo", c); err != nil {
+		// Handle err.
+	}
 
 	for {
 		c.Inc(1)
@@ -73,7 +75,7 @@ func Example() {
 	go worker()
 	// ...
 
-	// Stop reporter goroutine after 5 minutes
+	// Stop reporter goroutine after 5 minutes.
 	time.Sleep(5 * time.Minute)
 	stop()
 

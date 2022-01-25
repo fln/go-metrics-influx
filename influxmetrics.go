@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	influxdb "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
-	http2 "github.com/influxdata/influxdb-client-go/v2/api/http"
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
 	"github.com/influxdata/influxdb-client-go/v2/log"
 	metrics "github.com/rcrowley/go-metrics"
@@ -125,23 +125,22 @@ func (r *Reporter) Run(ctx context.Context) {
 		r.token,
 		influxdb.DefaultOptions().SetHTTPClient(&http.Client{
 			Timeout: r.interval,
-		}).SetPrecision(r.precision),
+		}).SetPrecision(r.precision).SetMaxRetries(r.retries),
 	)
-	defer client.Close()
 
 	rapi := client.WriteAPI(r.org, r.bucket)
-	rapi.SetWriteFailedCallback(
-		func(_ string, err http2.Error, retry uint) bool {
+	errCh := rapi.Errors()
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for err := range errCh {
 			r.log.WithField("error", err).
 				Error("writing metrics batch to influx database")
-
-			if retry >= r.retries {
-				return false
-			}
-
-			return true
-		},
-	)
+		}
+	}()
 
 	tc := time.NewTicker(r.interval)
 	defer tc.Stop()
@@ -149,6 +148,8 @@ func (r *Reporter) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			client.Close()
+			wg.Wait()
 			return
 		case tstamp := <-tc.C:
 			r.report(rapi, tstamp)
