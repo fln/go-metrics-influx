@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	influx "github.com/dbadv/go-metrics-influx"
+	influx "github.com/advbet/go-metrics-influx/v2"
 	metrics "github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )

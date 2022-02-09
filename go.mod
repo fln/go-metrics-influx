@@ -1,4 +1,4 @@
-module github.com/dbadv/go-metrics-influx
+module github.com/advbet/go-metrics-influx/v2
 
 go 1.17
 

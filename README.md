@@ -1,7 +1,7 @@
 go-metrics-influx
 =================
 
-[![Godoc](http://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](https://godoc.org/github.com/dbadv/go-metrics-influx)
+[![Godoc](http://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](https://godoc.org/github.com/advbet/go-metrics-influx)
 
 This is a reporter for the [go-metrics](https://github.com/rcrowley/go-metrics)
 library which will post the metrics to [InfluxDB](https://influxdb.com/).
@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	influx "github.com/dbadv/go-metrics-influx"
+	influx "github.com/advbet/go-metrics-influx/v2"
 	metrics "github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
 )
